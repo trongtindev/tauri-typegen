@@ -145,7 +145,7 @@ pub fn generate_from_config(
     }
 
     // Generate TypeScript models with discovered structs
-    let mut generator = create_generator(validation);
+    let mut generator = create_generator(validation)?;
     let generated_files = generator.generate_models(
         &commands,
         analyzer.get_discovered_structs(),

@@ -7,7 +7,7 @@ use crate::generators::zod::schema_builder::ZodSchemaBuilder;
 use crate::generators::zod::templates::ZodTemplate;
 use crate::generators::zod::type_visitor::ZodVisitor;
 use crate::generators::TypeCollector;
-use crate::models::{CommandInfo, EventInfo, StructInfo};
+use crate::models::{CommandInfo, EventInfo, StructInfo, WellKnownConstant};
 use crate::GenerateConfig;
 use std::collections::{HashMap, HashSet};
 use tera::{Context, Tera};
@@ -19,11 +19,15 @@ pub struct ZodBindingsGenerator {
 }
 
 impl ZodBindingsGenerator {
-    pub fn new() -> Self {
-        Self {
+    pub fn new() -> crate::Result<Self> {
+        Ok(Self {
             collector: TypeCollector::new(),
-            tera: ZodTemplate::create_tera().expect("Failed to initialize Zod template engine"),
-        }
+            tera: ZodTemplate::create_tera().map_err(|e| {
+                crate::Error::CodeGeneration(format!(
+                    "Failed to initialize Zod template engine: {e}"
+                ))
+            })?,
+        })
     }
 
     /// Generate Zod schema for a struct
@@ -32,7 +36,7 @@ impl ZodBindingsGenerator {
         name: &str,
         struct_info: &StructInfo,
         config: &GenerateConfig,
-    ) -> String {
+    ) -> crate::Result<String> {
         if struct_info.is_enum {
             self.generate_enum_schema(name, struct_info, config)
         } else {
@@ -46,15 +50,13 @@ impl ZodBindingsGenerator {
         name: &str,
         struct_info: &StructInfo,
         config: &GenerateConfig,
-    ) -> String {
+    ) -> crate::Result<String> {
         let visitor = ZodVisitor::with_config(config);
         let schema_builder = ZodSchemaBuilder::new(config);
 
-        // Create StructContext with all enum information
         let mut struct_context =
             StructContext::new(config).from_struct_info(name, struct_info, &visitor);
 
-        // For complex enums, enrich struct variant fields with proper Zod schemas
         if !struct_info.is_simple_enum() {
             for variant in &mut struct_context.enum_variants {
                 for field in &mut variant.struct_fields {
@@ -65,17 +67,13 @@ impl ZodBindingsGenerator {
             }
         }
 
-        // Prepare template context
         let mut context = Context::new();
         context.insert("name", name);
         context.insert("struct", &struct_context);
         context.insert("fields", &struct_context.fields);
 
         self.render("zod/partials/enum_schema.ts.tera", &context)
-            .unwrap_or_else(|e| {
-                eprintln!("Template rendering failed for enum {}: {}", name, e);
-                format!("// Error generating schema for {}: {}\n", name, e)
-            })
+            .map_err(crate::Error::CodeGeneration)
     }
 
     /// Generate Zod schema for an object/struct using templates
@@ -84,16 +82,14 @@ impl ZodBindingsGenerator {
         name: &str,
         struct_info: &StructInfo,
         config: &GenerateConfig,
-    ) -> String {
+    ) -> crate::Result<String> {
         let visitor = ZodVisitor::with_config(config);
         let schema_builder = ZodSchemaBuilder::new(config);
 
-        // Convert FieldInfo to FieldContext with computed Zod schemas
         let mut field_contexts: Vec<FieldContext> =
             self.collector
                 .create_field_contexts(struct_info, &visitor, config);
 
-        // Enrich with complete zod schemas including validators
         for field_context in &mut field_contexts {
             let zod_schema = schema_builder.build_schema(
                 &field_context.type_structure,
@@ -107,10 +103,7 @@ impl ZodBindingsGenerator {
         context.insert("fields", &field_contexts);
 
         self.render("zod/partials/schema.ts.tera", &context)
-            .unwrap_or_else(|e| {
-                eprintln!("Template rendering failed for {}: {}", name, e);
-                format!("// Error generating schema for {}: {}\n", name, e)
-            })
+            .map_err(crate::Error::CodeGeneration)
     }
 
     /// Generate the complete types.ts file content (with embedded schemas)
@@ -120,32 +113,29 @@ impl ZodBindingsGenerator {
         used_structs: &HashMap<String, StructInfo>,
         analyzer: &CommandAnalyzer,
         config: &GenerateConfig,
-    ) -> String {
-        // Sort structs topologically
+    ) -> crate::Result<String> {
         let type_names: HashSet<String> = used_structs.keys().cloned().collect();
         let sorted_types = analyzer.topological_sort_types(&type_names);
 
-        // Render struct schemas up front so the template only handles section layout.
         let sections = sorted_types
             .iter()
             .filter_map(|name| {
                 used_structs.get(name).map(|struct_info| {
                     self.generate_struct_schema(name, struct_info, config)
-                        .trim()
-                        .to_string()
+                        .map(|s| s.trim().to_string())
                 })
             })
+            .collect::<crate::Result<Vec<_>>>()?
+            .into_iter()
             .filter(|section| !section.is_empty())
             .collect::<Vec<_>>();
 
-        // Convert commands to context wrappers
         let visitor = ZodVisitor::with_config(config);
         let schema_builder = ZodSchemaBuilder::new(config);
         let mut command_contexts = self
             .collector
             .create_command_contexts(commands, &visitor, analyzer, config);
 
-        // Enrich parameters with complete zod schemas
         for command_context in &mut command_contexts {
             for param in &mut command_context.parameters {
                 let zod_schema = schema_builder.build_param_schema(&param.type_structure);
@@ -153,7 +143,6 @@ impl ZodBindingsGenerator {
             }
         }
 
-        // Split command contexts by the template fragments they actually need.
         let commands_with_params = command_contexts
             .iter()
             .filter(|command| !command.parameters.is_empty())
@@ -165,9 +154,13 @@ impl ZodBindingsGenerator {
             .cloned()
             .collect::<Vec<_>>();
 
-        // Render main types.ts template
         let mut context = Context::new();
-        context.insert("header", &self.generate_file_header());
+        context.insert(
+            "header",
+            &self
+                .generate_file_header()
+                .map_err(crate::Error::CodeGeneration)?,
+        );
         context.insert(
             "has_channels",
             &commands.iter().any(|cmd| !cmd.channels.is_empty()),
@@ -177,10 +170,7 @@ impl ZodBindingsGenerator {
         context.insert("commands_with_type_aliases", &commands_with_type_aliases);
 
         self.render("zod/types.ts.tera", &context)
-            .unwrap_or_else(|e| {
-                eprintln!("Template rendering failed for types.ts: {}", e);
-                String::new()
-            })
+            .map_err(crate::Error::CodeGeneration)
     }
 
     /// Generate command bindings with validation
@@ -189,18 +179,20 @@ impl ZodBindingsGenerator {
         commands: &[CommandInfo],
         analyzer: &CommandAnalyzer,
         config: &GenerateConfig,
-    ) -> String {
-        // Use ZodVisitor for command bindings - it can generate both Zod schemas
-        // and TypeScript types (via visit_type_for_interface)
+    ) -> crate::Result<String> {
         let visitor = ZodVisitor::with_config(config);
 
-        // Convert commands to context wrappers
         let command_contexts = self
             .collector
             .create_command_contexts(commands, &visitor, analyzer, config);
 
         let mut context = Context::new();
-        context.insert("header", &self.generate_file_header());
+        context.insert(
+            "header",
+            &self
+                .generate_file_header()
+                .map_err(crate::Error::CodeGeneration)?,
+        );
         context.insert("commands", &command_contexts);
         context.insert(
             "has_channels",
@@ -208,28 +200,27 @@ impl ZodBindingsGenerator {
         );
 
         self.render("zod/commands.ts.tera", &context)
-            .unwrap_or_else(|e| {
-                eprintln!("Template rendering failed for commands.ts: {}", e);
-                String::new()
-            })
+            .map_err(crate::Error::CodeGeneration)
     }
 
     /// Generate index.ts file
-    fn generate_index_file(&self, generated_files: &[String]) -> String {
+    fn generate_index_file(&self, generated_files: &[String]) -> crate::Result<String> {
         let modules = generated_files
             .iter()
             .filter(|file| file.as_str() != "index.ts")
             .cloned()
             .collect::<Vec<_>>();
         let mut context = Context::new();
-        context.insert("header", &self.generate_file_header());
+        context.insert(
+            "header",
+            &self
+                .generate_file_header()
+                .map_err(crate::Error::CodeGeneration)?,
+        );
         context.insert("modules", &modules);
 
         self.render("zod/index.ts.tera", &context)
-            .unwrap_or_else(|e| {
-                eprintln!("Template rendering failed for index.ts: {}", e);
-                String::new()
-            })
+            .map_err(crate::Error::CodeGeneration)
     }
 
     /// Generate events file content
@@ -238,24 +229,158 @@ impl ZodBindingsGenerator {
         events: &[EventInfo],
         analyzer: &CommandAnalyzer,
         config: &GenerateConfig,
-    ) -> String {
+    ) -> crate::Result<String> {
         let visitor = ZodVisitor::with_config(config);
 
-        // Convert events to context wrappers
         let event_contexts = self
             .collector
             .create_event_contexts(events, &visitor, analyzer, config);
 
         let mut context = Context::new();
-        context.insert("header", &self.generate_file_header());
+        context.insert(
+            "header",
+            &self
+                .generate_file_header()
+                .map_err(crate::Error::CodeGeneration)?,
+        );
         context.insert("events", &event_contexts);
 
         self.render("zod/events.ts.tera", &context)
-            .unwrap_or_else(|e| {
-                eprintln!("Template rendering failed for events.ts: {}", e);
-                String::new()
+            .map_err(crate::Error::CodeGeneration)
+    }
+
+    fn generate_constants_file_content(
+        &self,
+        used_structs: &HashMap<String, StructInfo>,
+        discovered_constants: &[WellKnownConstant],
+        config: &GenerateConfig,
+    ) -> crate::Result<String> {
+        let mut enum_constants: Vec<serde_json::Value> = Vec::new();
+
+        for (name, struct_info) in used_structs {
+            if !struct_info.is_enum {
+                continue;
+            }
+
+            let Some(ref variants) = struct_info.enum_variants else {
+                continue;
+            };
+
+            let mut values: Vec<serde_json::Value> = Vec::new();
+            for variant in variants {
+                let serialized = compute_variant_serialized_name(
+                    &variant.name,
+                    variant.serde_rename.as_deref(),
+                    struct_info.serde_rename_all,
+                    &config.default_field_case,
+                );
+                let key = to_constant_key(&serialized);
+                values.push(serde_json::json!({
+                    "key": key,
+                    "value": serialized,
+                }));
+            }
+
+            if !values.is_empty() {
+                enum_constants.push(serde_json::json!({
+                    "name": name,
+                    "values": values,
+                }));
+            }
+        }
+
+        let mut wkc_map: HashMap<String, Vec<serde_json::Value>> = HashMap::new();
+        for wkc in discovered_constants {
+            let key = to_constant_key(&wkc.const_name);
+            wkc_map
+                .entry(wkc.module_name.clone())
+                .or_default()
+                .push(serde_json::json!({
+                    "key": key,
+                    "value": wkc.value,
+                }));
+        }
+
+        for (module_name, values) in wkc_map {
+            let ts_name = to_pascal_case(&module_name);
+            enum_constants.push(serde_json::json!({
+                "name": ts_name,
+                "values": values,
+            }));
+        }
+
+        let mut context = Context::new();
+        context.insert("enum_constants", &enum_constants);
+        context.insert("version", &env!("CARGO_PKG_VERSION").to_string());
+
+        self.tera
+            .render("zod/constants.ts.tera", &context)
+            .map_err(|e| {
+                crate::Error::CodeGeneration(format!(
+                    "Template rendering failed for constants.ts: {e}"
+                ))
             })
     }
+}
+
+fn to_constant_key(name: &str) -> String {
+    let mut result = String::new();
+    for (i, c) in name.chars().enumerate() {
+        if c == '_' {
+            result.push('_');
+            continue;
+        }
+        if i > 0
+            && c.is_uppercase()
+            && name.chars().nth(i - 1) != Some('_')
+            && !name
+                .chars()
+                .nth(i - 1)
+                .is_some_and(|prev| prev.is_uppercase())
+        {
+            result.push('_');
+        }
+        result.push(c.to_ascii_uppercase());
+    }
+    result
+}
+
+fn to_pascal_case(name: &str) -> String {
+    let mut result = String::new();
+    for segment in name.split("::") {
+        let mut uppercase_next = true;
+        for c in segment.chars() {
+            if c == '_' || c == '-' {
+                uppercase_next = true;
+                continue;
+            }
+            if uppercase_next {
+                result.push(c.to_ascii_uppercase());
+                uppercase_next = false;
+            } else {
+                result.push(c.to_ascii_lowercase());
+            }
+        }
+    }
+    result
+}
+
+fn compute_variant_serialized_name(
+    variant_name: &str,
+    variant_rename: Option<&str>,
+    enum_rename_all: Option<serde_rename_rule::RenameRule>,
+    default_field_case: &str,
+) -> String {
+    use serde_rename_rule::RenameRule;
+
+    if let Some(rename) = variant_rename {
+        return rename.to_string();
+    }
+
+    let rule = enum_rename_all.unwrap_or_else(|| {
+        RenameRule::from_rename_all_str(default_field_case).unwrap_or(RenameRule::CamelCase)
+    });
+    rule.apply_to_field(variant_name)
 }
 
 impl BaseBindingsGenerator for ZodBindingsGenerator {
@@ -279,45 +404,37 @@ impl BaseBindingsGenerator for ZodBindingsGenerator {
         analyzer: &CommandAnalyzer,
         config: &GenerateConfig,
     ) -> Result<Vec<String>, Box<dyn std::error::Error>> {
-        // Store known structs for reference
         self.collector.known_structs = discovered_structs.clone();
 
-        // Filter to only the types used by commands and events
         let events = analyzer.get_discovered_events();
         let used_structs = self
             .collector
             .collect_used_types(commands, events, discovered_structs);
 
-        // Create file writer
         let mut file_writer = FileWriter::new(output_path)?;
 
-        // Generate and write types file (with embedded schemas)
         let types_content =
-            self.generate_types_file_content(commands, &used_structs, analyzer, config);
+            self.generate_types_file_content(commands, &used_structs, analyzer, config)?;
         file_writer.write_types_file(&types_content)?;
 
-        // Generate and write commands file
-        let commands_content = self.generate_command_bindings(commands, analyzer, config);
+        let commands_content = self.generate_command_bindings(commands, analyzer, config)?;
         file_writer.write_commands_file(&commands_content)?;
 
-        // Generate and write events file if there are any events
         let events = analyzer.get_discovered_events();
         if !events.is_empty() {
-            let events_content = self.generate_events_file(events, analyzer, config);
+            let events_content = self.generate_events_file(events, analyzer, config)?;
             file_writer.write_events_file(&events_content)?;
         }
 
-        // Generate and write index file
-        let index_content = self.generate_index_file(file_writer.get_generated_files());
+        let constants = analyzer.get_discovered_constants();
+        let constants_content =
+            self.generate_constants_file_content(&used_structs, constants, config)?;
+        file_writer.write_constants_file(&constants_content)?;
+
+        let index_content = self.generate_index_file(file_writer.get_generated_files())?;
         file_writer.write_index_file(&index_content)?;
 
         Ok(file_writer.get_generated_files().to_vec())
-    }
-}
-
-impl Default for ZodBindingsGenerator {
-    fn default() -> Self {
-        Self::new()
     }
 }
 
@@ -328,12 +445,16 @@ mod tests {
     use crate::models::{EventInfo, FieldInfo, TypeStructure};
     use std::collections::HashMap;
 
+    fn mk_gen() -> ZodBindingsGenerator {
+        ZodBindingsGenerator::new().unwrap()
+    }
+
     mod initialization {
         use super::*;
 
         #[test]
         fn test_new_creates_generator() {
-            let gen = ZodBindingsGenerator::new();
+            let gen = mk_gen();
             assert!(
                 gen.collector.known_structs.is_empty() || !gen.collector.known_structs.is_empty()
             );
@@ -341,7 +462,7 @@ mod tests {
 
         #[test]
         fn test_default_creates_generator() {
-            let gen = ZodBindingsGenerator::default();
+            let gen = mk_gen();
             assert!(
                 gen.collector.known_structs.is_empty() || !gen.collector.known_structs.is_empty()
             );
@@ -353,13 +474,13 @@ mod tests {
 
         #[test]
         fn test_generator_type_returns_zod() {
-            let gen = ZodBindingsGenerator::new();
+            let gen = mk_gen();
             assert_eq!(gen.generator_type(), "zod");
         }
 
         #[test]
         fn test_tera_returns_engine() {
-            let gen = ZodBindingsGenerator::new();
+            let gen = mk_gen();
             let tera = gen.tera();
             // Verify it has registered templates
             assert!(tera.get_template_names().count() > 0);
@@ -367,7 +488,7 @@ mod tests {
 
         #[test]
         fn test_type_collector_returns_collector() {
-            let gen = ZodBindingsGenerator::new();
+            let gen = mk_gen();
             let collector = gen.type_collector();
             // Verify collector exists
             assert!(collector.known_structs.is_empty() || !collector.known_structs.is_empty());
@@ -379,15 +500,15 @@ mod tests {
 
         #[test]
         fn test_generate_file_header() {
-            let gen = ZodBindingsGenerator::new();
-            let header = gen.generate_file_header();
+            let gen = mk_gen();
+            let header = gen.generate_file_header().unwrap();
             assert!(header.contains("Auto-generated") || header.contains("tauri-typegen"));
             assert!(header.contains("zod")); // generator type
         }
 
         #[test]
         fn test_has_zod_templates() {
-            let gen = ZodBindingsGenerator::new();
+            let gen = mk_gen();
             let tera = gen.tera();
             let template_names: Vec<&str> = tera.get_template_names().collect();
 
@@ -399,7 +520,7 @@ mod tests {
 
         #[test]
         fn test_render_returns_error_for_invalid_template() {
-            let gen = ZodBindingsGenerator::new();
+            let gen = mk_gen();
             let context = Context::new();
             let result = gen.render("nonexistent/template.tera", &context);
             assert!(result.is_err());
@@ -494,42 +615,50 @@ mod tests {
 
         #[test]
         fn test_generate_enum_schema() {
-            let gen = ZodBindingsGenerator::new();
+            let gen = mk_gen();
             let config = create_test_config();
             let struct_info = create_test_struct(true);
 
-            let result = gen.generate_enum_schema("TestEnum", &struct_info, &config);
+            let result = gen
+                .generate_enum_schema("TestEnum", &struct_info, &config)
+                .unwrap();
             assert!(result.contains("TestEnumSchema"));
             assert!(result.contains("z.enum"));
         }
 
         #[test]
         fn test_generate_object_schema() {
-            let gen = ZodBindingsGenerator::new();
+            let gen = mk_gen();
             let config = create_test_config();
             let struct_info = create_test_struct(false);
 
-            let result = gen.generate_object_schema("TestStruct", &struct_info, &config);
+            let result = gen
+                .generate_object_schema("TestStruct", &struct_info, &config)
+                .unwrap();
             assert!(!result.is_empty());
         }
 
         #[test]
         fn test_generate_struct_schema_for_enum() {
-            let gen = ZodBindingsGenerator::new();
+            let gen = mk_gen();
             let config = create_test_config();
             let struct_info = create_test_struct(true);
 
-            let result = gen.generate_struct_schema("TestEnum", &struct_info, &config);
+            let result = gen
+                .generate_struct_schema("TestEnum", &struct_info, &config)
+                .unwrap();
             assert!(result.contains("z.enum"));
         }
 
         #[test]
         fn test_generate_struct_schema_for_struct() {
-            let gen = ZodBindingsGenerator::new();
+            let gen = mk_gen();
             let config = create_test_config();
             let struct_info = create_test_struct(false);
 
-            let result = gen.generate_struct_schema("TestStruct", &struct_info, &config);
+            let result = gen
+                .generate_struct_schema("TestStruct", &struct_info, &config)
+                .unwrap();
             assert!(!result.is_empty());
         }
     }
@@ -540,29 +669,29 @@ mod tests {
 
         #[test]
         fn test_generate_index_file_with_empty_files() {
-            let gen = ZodBindingsGenerator::new();
+            let gen = mk_gen();
             let files = vec![];
-            let result = gen.generate_index_file(&files);
+            let result = gen.generate_index_file(&files).unwrap();
             assert!(result.contains("Auto-generated") || result.contains("//"));
         }
 
         #[test]
         fn test_generate_index_file_with_files() {
-            let gen = ZodBindingsGenerator::new();
+            let gen = mk_gen();
             let files = vec!["types.ts".to_string(), "commands.ts".to_string()];
-            let result = gen.generate_index_file(&files);
+            let result = gen.generate_index_file(&files).unwrap();
             assert!(!result.is_empty());
         }
 
         #[test]
         fn test_generate_index_file_skips_index_without_blank_lines() {
-            let gen = ZodBindingsGenerator::new();
+            let gen = mk_gen();
             let files = vec![
                 "types.ts".to_string(),
                 "index.ts".to_string(),
                 "commands.ts".to_string(),
             ];
-            let result = result_without_timestamp(&gen.generate_index_file(&files));
+            let result = result_without_timestamp(&gen.generate_index_file(&files).unwrap());
 
             assert!(result.contains(" */\n\nexport * from './types';"));
             assert!(result.contains("export * from './types';\nexport * from './commands';"));
@@ -571,7 +700,7 @@ mod tests {
 
         #[test]
         fn test_generate_command_bindings_avoid_blank_lines_between_functions() {
-            let gen = ZodBindingsGenerator::new();
+            let gen = mk_gen();
             let analyzer = CommandAnalyzer::new();
             let config = GenerateConfig {
                 project_path: ".".to_string(),
@@ -606,7 +735,8 @@ mod tests {
                 CommandInfo::new_for_test("beta_command", "b.rs", 1, vec![], "Beta", false, vec![]),
             ];
             let rendered = result_without_timestamp(
-                &gen.generate_command_bindings(&commands, &analyzer, &config),
+                &gen.generate_command_bindings(&commands, &analyzer, &config)
+                    .unwrap(),
             );
 
             assert!(
@@ -625,7 +755,7 @@ mod tests {
 
         #[test]
         fn test_generate_events_file_has_single_blank_line_between_listeners() {
-            let gen = ZodBindingsGenerator::new();
+            let gen = mk_gen();
             let analyzer = CommandAnalyzer::new();
             let config = GenerateConfig {
                 project_path: ".".to_string(),
@@ -657,8 +787,10 @@ mod tests {
                     line_number: 2,
                 },
             ];
-            let rendered =
-                result_without_timestamp(&gen.generate_events_file(&events, &analyzer, &config));
+            let rendered = result_without_timestamp(
+                &gen.generate_events_file(&events, &analyzer, &config)
+                    .unwrap(),
+            );
 
             assert!(
                 rendered.contains("  });\n}\n\n/**\n * Listen for 'beta-ready' events"),
@@ -672,7 +804,7 @@ mod tests {
 
         #[test]
         fn test_generate_types_file_keeps_blank_line_after_header() {
-            let gen = ZodBindingsGenerator::new();
+            let gen = mk_gen();
             let analyzer = CommandAnalyzer::new();
             let config = GenerateConfig {
                 project_path: ".".to_string(),
@@ -688,12 +820,10 @@ mod tests {
                 default_field_case: "snake_case".to_string(),
                 force: Some(false),
             };
-            let rendered = result_without_timestamp(&gen.generate_types_file_content(
-                &[],
-                &HashMap::new(),
-                &analyzer,
-                &config,
-            ));
+            let rendered = result_without_timestamp(
+                &gen.generate_types_file_content(&[], &HashMap::new(), &analyzer, &config)
+                    .unwrap(),
+            );
 
             assert!(
                 rendered.contains(" */\n\nimport { z } from 'zod';"),
@@ -703,7 +833,7 @@ mod tests {
 
         #[test]
         fn test_generate_types_file_compacts_channel_interfaces() {
-            let gen = ZodBindingsGenerator::new();
+            let gen = mk_gen();
             let analyzer = CommandAnalyzer::new();
             let config = GenerateConfig {
                 project_path: ".".to_string(),
@@ -740,12 +870,10 @@ mod tests {
                     1,
                 )],
             )];
-            let rendered = result_without_timestamp(&gen.generate_types_file_content(
-                &commands,
-                &HashMap::new(),
-                &analyzer,
-                &config,
-            ));
+            let rendered = result_without_timestamp(
+                &gen.generate_types_file_content(&commands, &HashMap::new(), &analyzer, &config)
+                    .unwrap(),
+            );
 
             assert!(
                 rendered.contains(
@@ -836,7 +964,7 @@ mod tests {
 
         #[test]
         fn deterministic_output_for_reversed_inputs() {
-            let generator = ZodBindingsGenerator::new();
+            let generator = mk_gen();
             let analyzer = CommandAnalyzer::new();
             let config = create_test_config();
 
@@ -894,16 +1022,24 @@ mod tests {
                 create_test_event("beta-ready", "b.rs", 20),
             ];
 
-            let types1 =
-                generator.generate_types_file_content(&commands1, &structs1, &analyzer, &config);
-            let types2 =
-                generator.generate_types_file_content(&commands2, &structs2, &analyzer, &config);
-            let commands_file1 =
-                generator.generate_command_bindings(&commands1, &analyzer, &config);
-            let commands_file2 =
-                generator.generate_command_bindings(&commands2, &analyzer, &config);
-            let events_file1 = generator.generate_events_file(&events1, &analyzer, &config);
-            let events_file2 = generator.generate_events_file(&events2, &analyzer, &config);
+            let types1 = generator
+                .generate_types_file_content(&commands1, &structs1, &analyzer, &config)
+                .unwrap();
+            let types2 = generator
+                .generate_types_file_content(&commands2, &structs2, &analyzer, &config)
+                .unwrap();
+            let commands_file1 = generator
+                .generate_command_bindings(&commands1, &analyzer, &config)
+                .unwrap();
+            let commands_file2 = generator
+                .generate_command_bindings(&commands2, &analyzer, &config)
+                .unwrap();
+            let events_file1 = generator
+                .generate_events_file(&events1, &analyzer, &config)
+                .unwrap();
+            let events_file2 = generator
+                .generate_events_file(&events2, &analyzer, &config)
+                .unwrap();
 
             assert_eq!(
                 normalize_generated_output(&types1),

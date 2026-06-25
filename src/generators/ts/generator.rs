@@ -17,12 +17,15 @@ pub struct TypeScriptBindingsGenerator {
 }
 
 impl TypeScriptBindingsGenerator {
-    pub fn new() -> Self {
-        Self {
+    pub fn new() -> crate::Result<Self> {
+        Ok(Self {
             collector: TypeCollector::new(),
-            tera: TypeScriptTemplate::create_tera()
-                .expect("Failed to initialize TypeScript template engine"),
-        }
+            tera: TypeScriptTemplate::create_tera().map_err(|e| {
+                crate::Error::CodeGeneration(format!(
+                    "Failed to initialize TypeScript template engine: {e}"
+                ))
+            })?,
+        })
     }
 
     /// Generate the complete types.ts file content
@@ -32,16 +35,14 @@ impl TypeScriptBindingsGenerator {
         used_structs: &HashMap<String, StructInfo>,
         analyzer: &CommandAnalyzer,
         config: &GenerateConfig,
-    ) -> String {
+    ) -> crate::Result<String> {
         let has_channels = commands.iter().any(|cmd| !cmd.channels.is_empty());
         let visitor = TypeScriptVisitor::with_config(config);
 
-        // Convert structs to context wrappers
         let struct_contexts = self
             .collector
             .create_struct_contexts(used_structs, &visitor, config);
 
-        // Convert commands to context wrappers
         let command_contexts = self
             .collector
             .create_command_contexts(commands, &visitor, analyzer, config);
@@ -51,18 +52,19 @@ impl TypeScriptBindingsGenerator {
             .cloned()
             .collect::<Vec<_>>();
 
-        // Render main types.ts template
         let mut context = Context::new();
-        context.insert("header", &self.generate_file_header());
+        context.insert(
+            "header",
+            &self
+                .generate_file_header()
+                .map_err(crate::Error::CodeGeneration)?,
+        );
         context.insert("has_channels", &has_channels);
         context.insert("structs", &struct_contexts);
         context.insert("param_commands", &param_commands);
 
         self.render("typescript/types.ts.tera", &context)
-            .unwrap_or_else(|e| {
-                eprintln!("Template rendering failed for types.ts: {}", e);
-                String::new()
-            })
+            .map_err(crate::Error::CodeGeneration)
     }
 
     /// Generate command bindings
@@ -71,43 +73,46 @@ impl TypeScriptBindingsGenerator {
         commands: &[CommandInfo],
         analyzer: &CommandAnalyzer,
         config: &GenerateConfig,
-    ) -> String {
+    ) -> crate::Result<String> {
         let has_channels = commands.iter().any(|cmd| !cmd.channels.is_empty());
         let visitor = TypeScriptVisitor::with_config(config);
 
-        // Convert commands to context wrappers
         let command_contexts = self
             .collector
             .create_command_contexts(commands, &visitor, analyzer, config);
 
         let mut context = Context::new();
-        context.insert("header", &self.generate_file_header());
+        context.insert(
+            "header",
+            &self
+                .generate_file_header()
+                .map_err(crate::Error::CodeGeneration)?,
+        );
         context.insert("commands", &command_contexts);
         context.insert("has_channels", &has_channels);
 
         self.render("typescript/commands.ts.tera", &context)
-            .unwrap_or_else(|e| {
-                eprintln!("Template rendering failed for commands.ts: {}", e);
-                String::new()
-            })
+            .map_err(crate::Error::CodeGeneration)
     }
 
     /// Generate index.ts file
-    fn generate_index_file(&self, generated_files: &[String]) -> String {
+    fn generate_index_file(&self, generated_files: &[String]) -> crate::Result<String> {
         let modules = generated_files
             .iter()
             .filter(|file| file.as_str() != "index.ts")
             .cloned()
             .collect::<Vec<_>>();
         let mut context = Context::new();
-        context.insert("header", &self.generate_file_header());
+        context.insert(
+            "header",
+            &self
+                .generate_file_header()
+                .map_err(crate::Error::CodeGeneration)?,
+        );
         context.insert("modules", &modules);
 
         self.render("typescript/index.ts.tera", &context)
-            .unwrap_or_else(|e| {
-                eprintln!("Template rendering failed for index.ts: {}", e);
-                String::new()
-            })
+            .map_err(crate::Error::CodeGeneration)
     }
 
     /// Generate events file content
@@ -116,23 +121,24 @@ impl TypeScriptBindingsGenerator {
         events: &[EventInfo],
         analyzer: &CommandAnalyzer,
         config: &GenerateConfig,
-    ) -> String {
+    ) -> crate::Result<String> {
         let visitor = TypeScriptVisitor::with_config(config);
 
-        // Convert events to context wrappers
         let event_contexts = self
             .collector
             .create_event_contexts(events, &visitor, analyzer, config);
 
         let mut context = Context::new();
-        context.insert("header", &self.generate_file_header());
+        context.insert(
+            "header",
+            &self
+                .generate_file_header()
+                .map_err(crate::Error::CodeGeneration)?,
+        );
         context.insert("events", &event_contexts);
 
         self.render("typescript/events.ts.tera", &context)
-            .unwrap_or_else(|e| {
-                eprintln!("Template rendering failed for events.ts: {}", e);
-                String::new()
-            })
+            .map_err(crate::Error::CodeGeneration)
     }
 }
 
@@ -157,45 +163,32 @@ impl BaseBindingsGenerator for TypeScriptBindingsGenerator {
         analyzer: &CommandAnalyzer,
         config: &GenerateConfig,
     ) -> Result<Vec<String>, Box<dyn std::error::Error>> {
-        // Store known structs for reference
         self.collector.known_structs = discovered_structs.clone();
 
-        // Filter to only the types used by commands and events
         let events = analyzer.get_discovered_events();
         let used_structs = self
             .collector
             .collect_used_types(commands, events, discovered_structs);
 
-        // Create file writer
         let mut file_writer = FileWriter::new(output_path)?;
 
-        // Generate and write types file
         let types_content =
-            self.generate_types_file_content(commands, &used_structs, analyzer, config);
+            self.generate_types_file_content(commands, &used_structs, analyzer, config)?;
         file_writer.write_types_file(&types_content)?;
 
-        // Generate and write commands file
-        let commands_content = self.generate_command_bindings(commands, analyzer, config);
+        let commands_content = self.generate_command_bindings(commands, analyzer, config)?;
         file_writer.write_commands_file(&commands_content)?;
 
-        // Generate and write events file if there are any events
         let events = analyzer.get_discovered_events();
         if !events.is_empty() {
-            let events_content = self.generate_events_file(events, analyzer, config);
+            let events_content = self.generate_events_file(events, analyzer, config)?;
             file_writer.write_events_file(&events_content)?;
         }
 
-        // Generate and write index file
-        let index_content = self.generate_index_file(file_writer.get_generated_files());
+        let index_content = self.generate_index_file(file_writer.get_generated_files())?;
         file_writer.write_index_file(&index_content)?;
 
         Ok(file_writer.get_generated_files().to_vec())
-    }
-}
-
-impl Default for TypeScriptBindingsGenerator {
-    fn default() -> Self {
-        Self::new()
     }
 }
 
@@ -207,20 +200,16 @@ mod tests {
     use crate::GenerateConfig;
     use std::collections::HashMap;
 
+    fn mk_gen() -> TypeScriptBindingsGenerator {
+        TypeScriptBindingsGenerator::new().unwrap()
+    }
+
     mod initialization {
         use super::*;
 
         #[test]
         fn test_new_creates_generator() {
-            let gen = TypeScriptBindingsGenerator::new();
-            assert!(
-                !gen.collector.known_structs.is_empty() || gen.collector.known_structs.is_empty()
-            );
-        }
-
-        #[test]
-        fn test_default_creates_generator() {
-            let gen = TypeScriptBindingsGenerator::default();
+            let gen = mk_gen();
             assert!(
                 !gen.collector.known_structs.is_empty() || gen.collector.known_structs.is_empty()
             );
@@ -232,13 +221,13 @@ mod tests {
 
         #[test]
         fn test_generator_type_returns_none() {
-            let gen = TypeScriptBindingsGenerator::new();
+            let gen = mk_gen();
             assert_eq!(gen.generator_type(), "none");
         }
 
         #[test]
         fn test_tera_returns_engine() {
-            let gen = TypeScriptBindingsGenerator::new();
+            let gen = mk_gen();
             let tera = gen.tera();
             // Verify it has registered templates
             assert!(tera.get_template_names().count() > 0);
@@ -246,7 +235,7 @@ mod tests {
 
         #[test]
         fn test_type_collector_returns_collector() {
-            let gen = TypeScriptBindingsGenerator::new();
+            let gen = mk_gen();
             let collector = gen.type_collector();
             // Verify collector exists
             assert!(collector.known_structs.is_empty() || !collector.known_structs.is_empty());
@@ -258,15 +247,15 @@ mod tests {
 
         #[test]
         fn test_generate_file_header() {
-            let gen = TypeScriptBindingsGenerator::new();
-            let header = gen.generate_file_header();
+            let gen = mk_gen();
+            let header = gen.generate_file_header().unwrap();
             assert!(header.contains("Auto-generated") || header.contains("tauri-typegen"));
             assert!(header.contains("none")); // generator type
         }
 
         #[test]
         fn test_has_typescript_templates() {
-            let gen = TypeScriptBindingsGenerator::new();
+            let gen = mk_gen();
             let tera = gen.tera();
             let template_names: Vec<&str> = tera.get_template_names().collect();
 
@@ -278,7 +267,7 @@ mod tests {
 
         #[test]
         fn test_render_returns_error_for_invalid_template() {
-            let gen = TypeScriptBindingsGenerator::new();
+            let gen = mk_gen();
             let context = Context::new();
             let result = gen.render("nonexistent/template.tera", &context);
             assert!(result.is_err());
@@ -291,29 +280,29 @@ mod tests {
 
         #[test]
         fn test_generate_index_file_with_empty_files() {
-            let gen = TypeScriptBindingsGenerator::new();
+            let gen = mk_gen();
             let files = vec![];
-            let result = gen.generate_index_file(&files);
+            let result = gen.generate_index_file(&files).unwrap();
             assert!(result.contains("Auto-generated") || result.contains("//"));
         }
 
         #[test]
         fn test_generate_index_file_with_files() {
-            let gen = TypeScriptBindingsGenerator::new();
+            let gen = mk_gen();
             let files = vec!["types.ts".to_string(), "commands.ts".to_string()];
-            let result = gen.generate_index_file(&files);
+            let result = gen.generate_index_file(&files).unwrap();
             assert!(!result.is_empty());
         }
 
         #[test]
         fn test_generate_index_file_skips_index_without_blank_lines() {
-            let gen = TypeScriptBindingsGenerator::new();
+            let gen = mk_gen();
             let files = vec![
                 "types.ts".to_string(),
                 "index.ts".to_string(),
                 "commands.ts".to_string(),
             ];
-            let result = result_without_timestamp(&gen.generate_index_file(&files));
+            let result = result_without_timestamp(&gen.generate_index_file(&files).unwrap());
 
             assert!(result.contains(" */\n\nexport * from './types';"));
             assert!(result.contains("export * from './types';\nexport * from './commands';"));
@@ -322,7 +311,7 @@ mod tests {
 
         #[test]
         fn test_generate_command_bindings_avoid_blank_lines_between_functions() {
-            let gen = TypeScriptBindingsGenerator::new();
+            let gen = mk_gen();
             let analyzer = CommandAnalyzer::new();
             let config = GenerateConfig::default();
             let commands = vec![
@@ -344,7 +333,8 @@ mod tests {
                 CommandInfo::new_for_test("beta_command", "b.rs", 1, vec![], "Beta", false, vec![]),
             ];
             let rendered = result_without_timestamp(
-                &gen.generate_command_bindings(&commands, &analyzer, &config),
+                &gen.generate_command_bindings(&commands, &analyzer, &config)
+                    .unwrap(),
             );
 
             assert!(
@@ -369,7 +359,7 @@ mod tests {
 
         #[test]
         fn test_generate_events_file_has_single_blank_line_between_listeners() {
-            let gen = TypeScriptBindingsGenerator::new();
+            let gen = mk_gen();
             let analyzer = CommandAnalyzer::new();
             let config = GenerateConfig::default();
             let events = vec![
@@ -388,8 +378,10 @@ mod tests {
                     line_number: 2,
                 },
             ];
-            let rendered =
-                result_without_timestamp(&gen.generate_events_file(&events, &analyzer, &config));
+            let rendered = result_without_timestamp(
+                &gen.generate_events_file(&events, &analyzer, &config)
+                    .unwrap(),
+            );
 
             assert!(
                 rendered.contains("  });\n}\n\n/**\n * Listen for 'beta-ready' events"),
@@ -403,15 +395,13 @@ mod tests {
 
         #[test]
         fn test_generate_types_file_keeps_blank_line_after_header() {
-            let gen = TypeScriptBindingsGenerator::new();
+            let gen = mk_gen();
             let analyzer = CommandAnalyzer::new();
             let config = GenerateConfig::default();
-            let rendered = result_without_timestamp(&gen.generate_types_file_content(
-                &[],
-                &HashMap::new(),
-                &analyzer,
-                &config,
-            ));
+            let rendered = result_without_timestamp(
+                &gen.generate_types_file_content(&[], &HashMap::new(), &analyzer, &config)
+                    .unwrap(),
+            );
 
             assert!(
                 rendered.contains(" */\n\n"),
@@ -421,7 +411,7 @@ mod tests {
 
         #[test]
         fn test_generate_types_file_compacts_param_interfaces() {
-            let gen = TypeScriptBindingsGenerator::new();
+            let gen = mk_gen();
             let analyzer = CommandAnalyzer::new();
             let config = GenerateConfig::default();
             let commands = vec![CommandInfo::new_for_test(
@@ -439,12 +429,10 @@ mod tests {
                 false,
                 vec![],
             )];
-            let rendered = result_without_timestamp(&gen.generate_types_file_content(
-                &commands,
-                &HashMap::new(),
-                &analyzer,
-                &config,
-            ));
+            let rendered = result_without_timestamp(
+                &gen.generate_types_file_content(&commands, &HashMap::new(), &analyzer, &config)
+                    .unwrap(),
+            );
 
             assert!(
                 rendered.contains(
@@ -535,7 +523,7 @@ mod tests {
 
         #[test]
         fn deterministic_output_for_reversed_inputs() {
-            let generator = TypeScriptBindingsGenerator::new();
+            let generator = mk_gen();
             let analyzer = CommandAnalyzer::new();
             let config = create_test_config();
 
@@ -593,16 +581,24 @@ mod tests {
                 create_test_event("beta-ready", "b.rs", 20),
             ];
 
-            let types1 =
-                generator.generate_types_file_content(&commands1, &structs1, &analyzer, &config);
-            let types2 =
-                generator.generate_types_file_content(&commands2, &structs2, &analyzer, &config);
-            let commands_file1 =
-                generator.generate_command_bindings(&commands1, &analyzer, &config);
-            let commands_file2 =
-                generator.generate_command_bindings(&commands2, &analyzer, &config);
-            let events_file1 = generator.generate_events_file(&events1, &analyzer, &config);
-            let events_file2 = generator.generate_events_file(&events2, &analyzer, &config);
+            let types1 = generator
+                .generate_types_file_content(&commands1, &structs1, &analyzer, &config)
+                .unwrap();
+            let types2 = generator
+                .generate_types_file_content(&commands2, &structs2, &analyzer, &config)
+                .unwrap();
+            let commands_file1 = generator
+                .generate_command_bindings(&commands1, &analyzer, &config)
+                .unwrap();
+            let commands_file2 = generator
+                .generate_command_bindings(&commands2, &analyzer, &config)
+                .unwrap();
+            let events_file1 = generator
+                .generate_events_file(&events1, &analyzer, &config)
+                .unwrap();
+            let events_file2 = generator
+                .generate_events_file(&events2, &analyzer, &config)
+                .unwrap();
 
             assert_eq!(
                 normalize_generated_output(&types1),

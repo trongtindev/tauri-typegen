@@ -64,7 +64,7 @@ impl TestGenerator {
         validation: Option<&str>,
         config: Option<&GenerateConfig>,
     ) -> Vec<String> {
-        let mut generator = create_generator(validation.map(|s| s.to_string()));
+        let mut generator = create_generator(validation.map(|s| s.to_string())).unwrap();
         let final_config = config.cloned().unwrap_or_default();
 
         generator

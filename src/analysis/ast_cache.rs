@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use syn::File as SynFile;
 use walkdir::WalkDir;
 
@@ -33,15 +33,6 @@ impl AstCache {
         }
     }
 
-    fn should_skip_path(path: &Path) -> bool {
-        path.components().any(|component| {
-            component
-                .as_os_str()
-                .to_str()
-                .is_some_and(|part| part == "target" || part == ".git")
-        })
-    }
-
     /// Parse and cache all Rust files in the given project path
     pub fn parse_and_cache_all_files(
         &mut self,
@@ -56,7 +47,15 @@ impl AstCache {
             let entry = entry?;
             let path = entry.path();
 
-            if Self::should_skip_path(path) {
+            let path_str = path.to_string_lossy();
+            if path_str.contains("/tests/")
+                || path_str.contains("\\tests\\")
+                || path.components().any(|c| {
+                    c.as_os_str()
+                        .to_str()
+                        .is_some_and(|s| s == "target" || s == ".git")
+                })
+            {
                 continue;
             }
 
@@ -151,6 +150,7 @@ mod tests {
     use super::*;
     use std::fs;
     use std::io::Write;
+    use std::path::Path;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::{Arc, Mutex};
     use std::thread;
@@ -225,7 +225,7 @@ mod tests {
         fn test_clone_works() {
             let ast: SynFile = syn::parse_str("fn main() {}").unwrap();
             let path = PathBuf::from("test.rs");
-            let parsed1 = ParsedFile::new(ast, path.clone());
+            let parsed1 = ParsedFile::new(ast, path);
             let parsed2 = parsed1.clone();
             assert_eq!(parsed1.path, parsed2.path);
         }
@@ -306,7 +306,7 @@ mod tests {
         #[test]
         fn test_parse_skips_target_directory() {
             let dir = temp_dir();
-            fs::create_dir_all(Path::new(&dir).join("target")).unwrap();
+            fs::create_dir_all(std::path::Path::new(&dir).join("target")).unwrap();
 
             create_rust_file(&dir, "lib.rs", "pub fn hello() {}");
             create_rust_file(&dir, "target/debug.rs", "fn debug() {}");
@@ -322,7 +322,7 @@ mod tests {
         #[test]
         fn test_parse_skips_git_directory() {
             let dir = temp_dir();
-            fs::create_dir_all(Path::new(&dir).join(".git")).unwrap();
+            fs::create_dir_all(std::path::Path::new(&dir).join(".git")).unwrap();
 
             create_rust_file(&dir, "lib.rs", "pub fn hello() {}");
             create_rust_file(&dir, ".git/hooks.rs", "fn hook() {}");
@@ -461,7 +461,7 @@ mod tests {
             let old = cache.insert(path.clone(), ParsedFile::new(ast1, path.clone()));
             assert!(old.is_none());
 
-            let old = cache.insert(path.clone(), ParsedFile::new(ast2, path.clone()));
+            let old = cache.insert(path.clone(), ParsedFile::new(ast2, path));
             assert!(old.is_some());
         }
 
@@ -472,7 +472,7 @@ mod tests {
             let path1 = PathBuf::from("test1.rs");
             let path2 = PathBuf::from("test2.rs");
 
-            cache.insert(path1.clone(), ParsedFile::new(ast.clone(), path1.clone()));
+            cache.insert(path1.clone(), ParsedFile::new(ast.clone(), path1));
             cache.insert(path2.clone(), ParsedFile::new(ast.clone(), path2.clone()));
 
             let keys: Vec<_> = cache.keys().collect();

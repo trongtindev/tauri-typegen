@@ -144,12 +144,7 @@ impl CommandContext {
     }
 
     /// Populate this context from a CommandInfo
-    pub fn from_command_info<V: TypeVisitor>(
-        mut self,
-        cmd: &CommandInfo,
-        visitor: &V,
-        type_resolver: &dyn Fn(&str) -> TypeStructure,
-    ) -> Self {
+    pub fn from_command_info<V: TypeVisitor>(mut self, cmd: &CommandInfo, visitor: &V) -> Self {
         // Use pre-parsed type structure from CommandInfo
         // Use visit_type_for_interface to get TypeScript types (not Zod schemas)
         let return_type_ts = visitor.visit_type_for_interface(&cmd.return_type_structure);
@@ -188,7 +183,6 @@ impl CommandContext {
                     c,
                     &cmd.serde_rename_all,
                     visitor,
-                    type_resolver,
                     &serialized_name,
                 )
             })
@@ -277,6 +271,9 @@ pub struct FieldContext {
     pub is_optional: bool,
     pub serialized_name: String,
     pub validator_attributes: Option<crate::models::ValidatorAttributes>,
+    /// Whether this field references another Zod schema (not a primitive/mapped type).
+    /// When true, the template uses getter syntax for Zod v4 lazy evaluation.
+    pub is_custom_reference: bool,
     #[serde(skip_serializing)]
     pub type_structure: TypeStructure, // Keep for internal use but don't expose to templates
     #[serde(skip)]
@@ -299,6 +296,7 @@ impl FieldContext {
             is_optional: false,
             serialized_name: String::new(),
             validator_attributes: None,
+            is_custom_reference: false,
             type_structure: TypeStructure::default(),
             config: config.clone(),
         }
@@ -323,6 +321,8 @@ impl FieldContext {
         self.is_optional = field.is_optional;
         self.serialized_name = serialized_name;
         self.validator_attributes = field.validator_attributes.clone();
+        self.is_custom_reference = field.type_structure.contains_custom_reference()
+            && !matches!(&field.type_structure, TypeStructure::Custom(name) if !visitor.is_custom_reference(name));
         self.type_structure = field.type_structure.clone();
 
         self
@@ -343,6 +343,9 @@ pub struct EnumVariantContext {
     pub tuple_types: Vec<String>,
     /// Zod schemas for tuple variant fields (e.g., ["z.number()", "z.number()"])
     pub tuple_zod_types: Vec<String>,
+    /// Whether the tuple variant's data field contains custom schema references
+    /// and needs getter syntax for Zod v4 lazy evaluation.
+    pub tuple_uses_getter: bool,
     /// Field contexts for struct variant fields
     pub struct_fields: Vec<FieldContext>,
     #[serde(skip)]
@@ -364,6 +367,7 @@ impl EnumVariantContext {
             kind: String::new(),
             tuple_types: Vec::new(),
             tuple_zod_types: Vec::new(),
+            tuple_uses_getter: false,
             struct_fields: Vec::new(),
             config: config.clone(),
         }
@@ -394,6 +398,7 @@ impl EnumVariantContext {
                     .map(|t| visitor.visit_type_for_interface(t))
                     .collect();
                 self.tuple_zod_types = types.iter().map(|t| visitor.visit_type(t)).collect();
+                self.tuple_uses_getter = types.iter().any(|t| t.contains_custom_reference());
             }
             EnumVariantKind::Struct(fields) => {
                 self.kind = "struct".to_string();
@@ -539,11 +544,10 @@ impl ChannelContext {
         channel: &ChannelInfo,
         _command_rename_all: &Option<RenameRule>,
         visitor: &V,
-        type_resolver: &dyn Fn(&str) -> TypeStructure,
         serialized_parameter_name: &str,
     ) -> Self {
-        let message_type_structure = type_resolver(&channel.message_type);
-        let typescript_message_type = visitor.visit_type_for_interface(&message_type_structure);
+        let typescript_message_type =
+            visitor.visit_type_for_interface(&channel.message_type_structure);
 
         self.parameter_name = channel.parameter_name.clone();
         self.message_type = channel.message_type.clone();
@@ -592,16 +596,10 @@ impl EventContext {
     }
 
     /// Populate this context from an EventInfo
-    pub fn from_event_info<V: TypeVisitor>(
-        mut self,
-        event: &EventInfo,
-        visitor: &V,
-        type_resolver: &dyn Fn(&str) -> TypeStructure,
-    ) -> Self {
-        let payload_type_structure = type_resolver(&event.payload_type);
-        let typescript_payload_type = visitor.visit_type_for_interface(&payload_type_structure);
+    pub fn from_event_info<V: TypeVisitor>(mut self, event: &EventInfo, visitor: &V) -> Self {
+        let typescript_payload_type =
+            visitor.visit_type_for_interface(&event.payload_type_structure);
 
-        // Use NamingContext trait method
         let ts_function_name = self.event_name_to_function(&event.event_name);
 
         self.event_name = event.event_name.clone();

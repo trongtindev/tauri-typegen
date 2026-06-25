@@ -8,7 +8,7 @@ pub mod struct_parser;
 pub mod type_resolver;
 pub mod validator_parser;
 
-use crate::models::{ChannelInfo, CommandInfo, EventInfo, StructInfo};
+use crate::models::{ChannelInfo, CommandInfo, EventInfo, StructInfo, WellKnownConstant};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
@@ -40,6 +40,8 @@ pub struct CommandAnalyzer {
     discovered_structs: HashMap<String, StructInfo>,
     /// Discovered event emissions
     discovered_events: Vec<EventInfo>,
+    /// Discovered well-known string constants
+    discovered_constants: Vec<WellKnownConstant>,
 }
 
 impl CommandAnalyzer {
@@ -54,6 +56,7 @@ impl CommandAnalyzer {
             dependency_graph: TypeDependencyGraph::new(),
             discovered_structs: HashMap::new(),
             discovered_events: Vec::new(),
+            discovered_constants: Vec::new(),
         }
     }
 
@@ -243,30 +246,54 @@ impl CommandAnalyzer {
 
     /// Build an index of type definitions from an AST
     fn index_type_definitions(&mut self, ast: &syn::File, file_path: &Path) {
-        self.index_items(&ast.items, file_path);
+        self.index_items(&ast.items, file_path, String::new());
     }
 
-    /// Recursively index items for type definitions
-    fn index_items(&mut self, items: &[syn::Item], file_path: &Path) {
+    /// Recursively index items for type definitions and well-known string constants
+    fn index_items(&mut self, items: &[syn::Item], file_path: &Path, module_prefix: String) {
         for item in items {
             match item {
-                syn::Item::Struct(item_struct) => {
-                    if self.struct_parser.should_include_struct(item_struct) {
-                        let struct_name = item_struct.ident.to_string();
-                        self.dependency_graph
-                            .add_type_definition(struct_name, file_path.to_path_buf());
-                    }
+                syn::Item::Struct(item_struct)
+                    if self.struct_parser.should_include_struct(item_struct) =>
+                {
+                    let struct_name = item_struct.ident.to_string();
+                    self.dependency_graph
+                        .add_type_definition(struct_name, file_path.to_path_buf());
                 }
-                syn::Item::Enum(item_enum) => {
-                    if self.struct_parser.should_include_enum(item_enum) {
-                        let enum_name = item_enum.ident.to_string();
-                        self.dependency_graph
-                            .add_type_definition(enum_name, file_path.to_path_buf());
+                syn::Item::Enum(item_enum) if self.struct_parser.should_include_enum(item_enum) => {
+                    let enum_name = item_enum.ident.to_string();
+                    self.dependency_graph
+                        .add_type_definition(enum_name, file_path.to_path_buf());
+                }
+                syn::Item::Const(item_const) => {
+                    if let syn::Visibility::Public(_) = item_const.vis {
+                        if !module_prefix.is_empty() && Self::is_str_static(&item_const.ty) {
+                            if let syn::Expr::Lit(syn::ExprLit {
+                                lit: syn::Lit::Str(lit_str),
+                                ..
+                            }) = &*item_const.expr
+                            {
+                                let segments: Vec<&str> = module_prefix.split("::").collect();
+                                if segments.last().is_some_and(|s| *s == "values") {
+                                    continue;
+                                }
+                                self.discovered_constants.push(WellKnownConstant {
+                                    module_name: module_prefix.clone(),
+                                    const_name: item_const.ident.to_string(),
+                                    value: lit_str.value(),
+                                });
+                            }
+                        }
                     }
                 }
                 syn::Item::Mod(item_mod) => {
                     if let Some((_, items)) = &item_mod.content {
-                        self.index_items(items, file_path);
+                        let next_prefix = if module_prefix.is_empty() {
+                            item_mod.ident.to_string()
+                        } else {
+                            format!("{}::{}", module_prefix, item_mod.ident)
+                        };
+                        self.index_items(items, file_path, next_prefix);
                     }
                 }
                 _ => {}
@@ -381,27 +408,25 @@ impl CommandAnalyzer {
     ) -> Option<StructInfo> {
         for item in items {
             match item {
-                syn::Item::Struct(item_struct) => {
+                syn::Item::Struct(item_struct)
                     if item_struct.ident == type_name
-                        && self.struct_parser.should_include_struct(item_struct)
-                    {
-                        return self.struct_parser.parse_struct(
-                            item_struct,
-                            file_path,
-                            &mut self.type_resolver,
-                        );
-                    }
+                        && self.struct_parser.should_include_struct(item_struct) =>
+                {
+                    return self.struct_parser.parse_struct(
+                        item_struct,
+                        file_path,
+                        &mut self.type_resolver,
+                    );
                 }
-                syn::Item::Enum(item_enum) => {
+                syn::Item::Enum(item_enum)
                     if item_enum.ident == type_name
-                        && self.struct_parser.should_include_enum(item_enum)
-                    {
-                        return self.struct_parser.parse_enum(
-                            item_enum,
-                            file_path,
-                            &mut self.type_resolver,
-                        );
-                    }
+                        && self.struct_parser.should_include_enum(item_enum) =>
+                {
+                    return self.struct_parser.parse_enum(
+                        item_enum,
+                        file_path,
+                        &mut self.type_resolver,
+                    );
                 }
                 syn::Item::Mod(item_mod) => {
                     if let Some((_, items)) = &item_mod.content {
@@ -559,6 +584,19 @@ impl CommandAnalyzer {
         }
     }
 
+    /// Check if a syn::Type is `&str` or `&'static str`
+    fn is_str_static(ty: &syn::Type) -> bool {
+        match ty {
+            syn::Type::Reference(syn::TypeReference { elem, .. }) => match elem.as_ref() {
+                syn::Type::Path(syn::TypePath { path, .. }) => {
+                    path.segments.len() == 1 && path.segments[0].ident == "str"
+                }
+                _ => false,
+            },
+            _ => false,
+        }
+    }
+
     /// Get discovered structs
     pub fn get_discovered_structs(&self) -> &HashMap<String, StructInfo> {
         &self.discovered_structs
@@ -567,6 +605,11 @@ impl CommandAnalyzer {
     /// Get discovered events
     pub fn get_discovered_events(&self) -> &[EventInfo] {
         &self.discovered_events
+    }
+
+    /// Get discovered well-known string constants
+    pub fn get_discovered_constants(&self) -> &[WellKnownConstant] {
+        &self.discovered_constants
     }
 
     /// Get reference to the type resolver
@@ -599,10 +642,8 @@ impl CommandAnalyzer {
     ) -> Option<&'a syn::ItemFn> {
         for item in items {
             match item {
-                syn::Item::Fn(func) => {
-                    if func.sig.ident == function_name {
-                        return Some(func);
-                    }
+                syn::Item::Fn(func) if func.sig.ident == function_name => {
+                    return Some(func);
                 }
                 syn::Item::Mod(item_mod) => {
                     if let Some((_, items)) = &item_mod.content {

@@ -39,13 +39,9 @@ impl CommandParser {
     ) {
         for item in items {
             match item {
-                syn::Item::Fn(func) => {
-                    if self.is_tauri_command(func) {
-                        if let Some(info) =
-                            self.extract_command_info(func, file_path, type_resolver)
-                        {
-                            commands.push(info);
-                        }
+                syn::Item::Fn(func) if self.is_tauri_command(func) => {
+                    if let Some(info) = self.extract_command_info(func, file_path, type_resolver) {
+                        commands.push(info);
                     }
                 }
                 syn::Item::Mod(item_mod) => {

@@ -78,6 +78,17 @@ pub trait TypeVisitor {
         name.to_string()
     }
 
+    /// Whether a custom type name refers to another schema (not mapped to a primitive/custom TS type).
+    /// Used for Zod v4 getter-based lazy evaluation of cross-schema references.
+    fn is_custom_reference(&self, name: &str) -> bool {
+        if let Some(config) = self.get_config() {
+            if let Some(ref mappings) = config.type_mappings {
+                return !mappings.contains_key(name);
+            }
+        }
+        true // no config → all custom types are references
+    }
+
     /// Visit a type for use in TypeScript type interfaces (not schemas)
     /// Default implementation uses visit_type, but can be overridden by visitors
     /// that need different representations for type interfaces vs schemas (e.g., ZodVisitor)
@@ -101,7 +112,10 @@ mod tests {
 
         // For schemas
         assert_eq!(visitor.visit_type(&num_type), "z.number()");
-        assert_eq!(visitor.visit_type(&custom_type), "LogEntrySchema");
+        assert_eq!(
+            visitor.visit_type(&custom_type),
+            "z.lazy<z.ZodType<any>>(() => LogEntrySchema)"
+        );
 
         // For type interfaces
         assert_eq!(visitor.visit_type_for_interface(&num_type), "number");
@@ -313,7 +327,7 @@ mod tests {
             );
             assert_eq!(
                 visitor.visit_type(&optional(custom("User"))),
-                "UserSchema.nullable()"
+                "z.lazy<z.ZodType<any>>(() => UserSchema).nullable()"
             );
         }
 
@@ -327,7 +341,7 @@ mod tests {
             );
             assert_eq!(
                 visitor.visit_type(&map(primitive("string"), custom("User"))),
-                "z.record(z.string(), UserSchema)"
+                "z.record(z.string(), z.lazy<z.ZodType<any>>(() => UserSchema))"
             );
         }
 
@@ -376,7 +390,10 @@ mod tests {
                 visitor.visit_type(&result(primitive("string"))),
                 "z.string()"
             );
-            assert_eq!(visitor.visit_type(&result(custom("User"))), "UserSchema");
+            assert_eq!(
+                visitor.visit_type(&result(custom("User"))),
+                "z.lazy<z.ZodType<any>>(() => UserSchema)"
+            );
         }
 
         #[test]
@@ -384,8 +401,14 @@ mod tests {
             let visitor = ZodVisitor::new();
 
             // Custom types reference their schema
-            assert_eq!(visitor.visit_type(&custom("User")), "UserSchema");
-            assert_eq!(visitor.visit_type(&custom("Product")), "ProductSchema");
+            assert_eq!(
+                visitor.visit_type(&custom("User")),
+                "z.lazy<z.ZodType<any>>(() => UserSchema)"
+            );
+            assert_eq!(
+                visitor.visit_type(&custom("Product")),
+                "z.lazy<z.ZodType<any>>(() => ProductSchema)"
+            );
         }
 
         #[test]
@@ -397,7 +420,7 @@ mod tests {
 
             assert_eq!(
                 visitor.visit_type(&complex),
-                "z.record(z.string(), z.array(UserSchema.nullable()))"
+                "z.record(z.string(), z.array(z.lazy<z.ZodType<any>>(() => UserSchema).nullable()))"
             );
         }
 
@@ -561,11 +584,11 @@ mod tests {
             // Without mappings, custom types should reference their schema
             assert_eq!(
                 visitor.visit_type(&custom("CustomDateTime")),
-                "CustomDateTimeSchema"
+                "z.lazy<z.ZodType<any>>(() => CustomDateTimeSchema)"
             );
             assert_eq!(
                 visitor.visit_type(&custom("CustomDate")),
-                "CustomDateSchema"
+                "z.lazy<z.ZodType<any>>(() => CustomDateSchema)"
             );
         }
 
@@ -581,7 +604,7 @@ mod tests {
             // Unmapped types should still reference their schema
             assert_eq!(
                 visitor.visit_type(&custom("UnmappedType")),
-                "UnmappedTypeSchema"
+                "z.lazy<z.ZodType<any>>(() => UnmappedTypeSchema)"
             );
         }
 
@@ -640,7 +663,7 @@ mod tests {
             // Non-primitive mappings should use z.custom()
             let result = visitor.visit_type(&custom("CustomType"));
             assert!(result.contains("z.custom<MyCustomType>"));
-            assert!(result.contains("(val) => true"));
+            assert!(result.contains("() => true"));
         }
     }
 }

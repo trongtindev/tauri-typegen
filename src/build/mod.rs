@@ -201,6 +201,7 @@ impl BuildSystem {
         // Check cache to see if regeneration is needed (unless force is set)
         let discovered_structs = analyzer.get_discovered_structs();
         let discovered_events = analyzer.get_discovered_events();
+        let discovered_constants = analyzer.get_discovered_constants();
         if config.should_force() {
             self.logger.verbose("Force flag set, regenerating bindings");
         } else {
@@ -209,6 +210,7 @@ impl BuildSystem {
                 &commands,
                 discovered_structs,
                 discovered_events,
+                discovered_constants,
                 config,
             ) {
                 Ok(false) => {
@@ -239,7 +241,7 @@ impl BuildSystem {
             _ => return Err("Invalid validation library. Use 'zod' or 'none'".into()),
         };
 
-        let mut generator = create_generator(validation);
+        let mut generator = create_generator(validation)?;
         let generated_files = generator.generate_models(
             &commands,
             discovered_structs,
@@ -254,7 +256,13 @@ impl BuildSystem {
         }
 
         // Save cache after successful generation
-        let cache = GenerationCache::new(&commands, discovered_structs, discovered_events, config)?;
+        let cache = GenerationCache::new(
+            &commands,
+            discovered_structs,
+            discovered_events,
+            discovered_constants,
+            config,
+        )?;
         if let Err(e) = cache.save(&config.output_path) {
             self.logger
                 .warning(&format!("Failed to save generation cache: {}", e));

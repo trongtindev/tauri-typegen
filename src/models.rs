@@ -41,6 +41,26 @@ impl Default for TypeStructure {
     }
 }
 
+impl TypeStructure {
+    /// Recursively check whether this type structure contains any custom type reference
+    /// that would resolve to another schema (not mapped to a primitive TS type).
+    /// Used to decide whether to emit getter syntax for Zod v4 lazy evaluation.
+    pub fn contains_custom_reference(&self) -> bool {
+        match self {
+            TypeStructure::Custom(_) => true,
+            TypeStructure::Array(inner) => inner.contains_custom_reference(),
+            TypeStructure::Map { key, value } => {
+                key.contains_custom_reference() || value.contains_custom_reference()
+            }
+            TypeStructure::Set(inner) => inner.contains_custom_reference(),
+            TypeStructure::Tuple(types) => types.iter().any(|t| t.contains_custom_reference()),
+            TypeStructure::Optional(inner) => inner.contains_custom_reference(),
+            TypeStructure::Result(inner) => inner.contains_custom_reference(),
+            TypeStructure::Primitive(_) => false,
+        }
+    }
+}
+
 /// Represents the kind of an enum variant for discriminated union generation
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -286,6 +306,17 @@ impl ChannelInfo {
                 .parse_type_structure(&message_type_str),
         }
     }
+}
+
+/// Represents a `pub const ...: &str = "..."` inside a `pub mod` block.
+/// These are extracted by tauri-typegen and emitted as generated TypeScript
+/// constants so the frontend can reference backend-defined string identifiers
+/// without duplication.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WellKnownConstant {
+    pub module_name: String,
+    pub const_name: String,
+    pub value: String,
 }
 
 #[cfg(test)]

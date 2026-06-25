@@ -6,8 +6,9 @@ export const {{ name }}Schema = z.enum([{% for field in fields -%}
 
 export type {{ name }} = z.infer<typeof {{ name }}Schema>;
 {% else -%}
-{# Complex enum: z.discriminatedUnion #}
-export const {{ name }}Schema = z.discriminatedUnion("{{ struct.discriminatorTag }}", [
+{# Complex enum: z.discriminatedUnion — uses z.ZodType<any> annotation
+   for recursive/circular type inference in strict TypeScript. #}
+export const {{ name }}Schema: z.ZodType<any> = z.discriminatedUnion("{{ struct.discriminatorTag }}", [
 {% for variant in struct.enumVariants -%}
   {% if variant.kind == "unit" -%}
   z.object({ {{ struct.discriminatorTag }}: z.literal("{{ variant.serializedName }}") }),

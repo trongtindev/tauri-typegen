@@ -88,10 +88,16 @@ impl TypeDependencyGraph {
     ) {
         // Check for cycles
         if visiting.contains(type_name) {
-            eprintln!(
-                "Warning: Circular dependency detected involving type: {}",
-                type_name
-            );
+            let is_self_referential = self
+                .dependencies
+                .get(type_name)
+                .is_some_and(|deps| deps.contains(type_name));
+            if !is_self_referential {
+                eprintln!(
+                    "Warning: Circular dependency detected involving type: {}",
+                    type_name
+                );
+            }
             return;
         }
 

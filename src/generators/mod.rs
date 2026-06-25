@@ -26,10 +26,12 @@ macro_rules! template {
 
 /// Factory function to create the appropriate bindings generator
 /// Returns a boxed trait object for polymorphism
-pub fn create_generator(validation_library: Option<String>) -> Box<dyn BindingsGenerator> {
+pub fn create_generator(
+    validation_library: Option<String>,
+) -> crate::Result<Box<dyn BindingsGenerator>> {
     match validation_library.as_deref().unwrap_or("none") {
-        "zod" => Box::new(ZodBindingsGenerator::new()),
-        _ => Box::new(TypeScriptBindingsGenerator::new()),
+        "zod" => Ok(Box::new(ZodBindingsGenerator::new()?)),
+        _ => Ok(Box::new(TypeScriptBindingsGenerator::new()?)),
     }
 }
 
@@ -228,7 +230,7 @@ impl TypeCollector {
         analyzer: &CommandAnalyzer,
         config: &GenerateConfig,
     ) -> Vec<CommandContext> {
-        let type_resolver = analyzer.get_type_resolver();
+        let _ = analyzer;
         let mut sorted_commands: Vec<_> = commands.iter().collect();
         sorted_commands.sort_by(|a, b| {
             a.name
@@ -237,20 +239,12 @@ impl TypeCollector {
                 .then_with(|| a.line_number.cmp(&b.line_number))
         });
 
-        // Deduplicate commands by name - first occurrence wins. The same
-        // command can be declared more than once under mutually-exclusive
-        // `#[cfg(...)]` gates (the standard cross-platform Tauri pattern);
-        // emitting both would produce duplicate TypeScript declarations.
         let mut seen_commands: std::collections::HashSet<&str> = std::collections::HashSet::new();
         sorted_commands.retain(|cmd| seen_commands.insert(cmd.name.as_str()));
 
         sorted_commands
             .into_iter()
-            .map(|cmd| {
-                CommandContext::new(config).from_command_info(cmd, visitor, &|rust_type: &str| {
-                    type_resolver.borrow_mut().parse_type_structure(rust_type)
-                })
-            })
+            .map(|cmd| CommandContext::new(config).from_command_info(cmd, visitor))
             .collect()
     }
 
@@ -262,8 +256,7 @@ impl TypeCollector {
         analyzer: &CommandAnalyzer,
         config: &GenerateConfig,
     ) -> Vec<EventContext> {
-        let type_resolver = analyzer.get_type_resolver();
-
+        let _ = analyzer;
         // Deduplicate events by name - first occurrence wins
         let mut seen_events: std::collections::HashSet<&str> = std::collections::HashSet::new();
         let mut sorted_events: Vec<&EventInfo> = Vec::new();
@@ -283,11 +276,7 @@ impl TypeCollector {
 
         sorted_events
             .into_iter()
-            .map(|event| {
-                EventContext::new(config).from_event_info(event, visitor, &|rust_type: &str| {
-                    type_resolver.borrow_mut().parse_type_structure(rust_type)
-                })
-            })
+            .map(|event| EventContext::new(config).from_event_info(event, visitor))
             .collect()
     }
 
@@ -351,26 +340,25 @@ mod tests {
 
         #[test]
         fn test_create_generator_zod() {
-            let gen = create_generator(Some("zod".to_string()));
-            // Just verify it creates without panic - we can't easily inspect trait objects
+            let gen = create_generator(Some("zod".to_string())).unwrap();
             assert!(std::any::type_name_of_val(&gen).contains("Box"));
         }
 
         #[test]
         fn test_create_generator_none() {
-            let gen = create_generator(Some("none".to_string()));
+            let gen = create_generator(Some("none".to_string())).unwrap();
             assert!(std::any::type_name_of_val(&gen).contains("Box"));
         }
 
         #[test]
         fn test_create_generator_default() {
-            let gen = create_generator(None);
+            let gen = create_generator(None).unwrap();
             assert!(std::any::type_name_of_val(&gen).contains("Box"));
         }
 
         #[test]
         fn test_create_generator_unknown_fallback() {
-            let gen = create_generator(Some("unknown".to_string()));
+            let gen = create_generator(Some("unknown".to_string())).unwrap();
             assert!(std::any::type_name_of_val(&gen).contains("Box"));
         }
     }

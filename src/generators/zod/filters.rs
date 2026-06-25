@@ -103,8 +103,9 @@ fn type_structure_to_zod_schema(type_structure: &TypeStructure, is_record_key: b
             )
         }
         TypeStructure::Custom(name) => {
-            // Reference to a custom type schema
-            format!("{}Schema", name)
+            // Reference to a custom type schema via z.lazy() to handle
+            // recursive types and forward-declaration ordering.
+            format!("z.lazy<z.ZodType<any>>(() => {}Schema)", name)
         }
     }
 }
@@ -282,7 +283,10 @@ mod tests {
 
         // Test custom type
         let ts = TypeStructure::Custom("User".to_string());
-        assert_eq!(type_structure_to_zod_schema(&ts, false), "UserSchema");
+        assert_eq!(
+            type_structure_to_zod_schema(&ts, false),
+            "z.lazy<z.ZodType<any>>(() => UserSchema)"
+        );
 
         // Test Set type
         let ts = TypeStructure::Set(Box::new(TypeStructure::Primitive("string".to_string())));

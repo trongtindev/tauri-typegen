@@ -95,14 +95,15 @@ impl<'a> TypeVisitor for ZodVisitor<'a> {
                         "void" => "z.void()".to_string(),
                         _ => {
                             // For non-primitive mappings, use z.custom()
-                            format!("z.custom<{}>((val) => true)", mapped_type)
+                            format!("z.custom<{}>(() => true)", mapped_type)
                         }
                     };
                 }
             }
         }
-        // No mapping found, reference the schema for custom types
-        format!("{}Schema", name)
+        // No mapping found, reference the schema via z.lazy() to handle
+        // recursive types and forward-declaration ordering in Zod.
+        format!("z.lazy<z.ZodType<any>>(() => {}Schema)", name)
     }
 
     /// Override to return TypeScript types (not zod schemas) for type interfaces

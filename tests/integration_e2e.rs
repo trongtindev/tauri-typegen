@@ -665,7 +665,7 @@ fn test_complex_enum_zod_generation() {
 
     // Complex enum should use z.discriminatedUnion
     assert!(
-        types.contains("ActionSchema = z.discriminatedUnion"),
+        types.contains("ActionSchema: z.ZodType<any> = z.discriminatedUnion"),
         "Complex enum should use z.discriminatedUnion. Got:\n{}",
         types
     );

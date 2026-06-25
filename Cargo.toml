@@ -28,13 +28,12 @@ serde-rename-rule = "0.2.2"
 name = "cargo-tauri-typegen"
 path = "src/bin/cargo-tauri-typegen.rs"
 
+[lints.rust]
+future-incompatible = "warn"
+nonstandard-style = "deny"
+rust-2018-idioms = "deny"
 
 [dev-dependencies]
 tokio = { version = "1.0", features = ["macros", "rt"] }
 tempfile = "3.0"
 serial_test = "3.0"
-
-[dev-dependencies.cargo-husky]
-version = "1"
-default-features = false
-features = ["user-hooks"]

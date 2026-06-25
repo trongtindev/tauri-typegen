@@ -477,7 +477,10 @@ mod tests {
         let builder = ZodSchemaBuilder::new(&config);
 
         let ts = TypeStructure::Custom("User".to_string());
-        assert_eq!(builder.build_schema(&ts, &None), "UserSchema");
+        assert_eq!(
+            builder.build_schema(&ts, &None),
+            "z.lazy<z.ZodType<any>>(() => UserSchema)"
+        );
     }
 
     #[test]

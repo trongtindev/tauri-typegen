@@ -12,6 +12,7 @@ impl TemplateRegistry for ZodTemplate {
         template!(tera, "zod/commands.ts.tera", "templates/commands.ts.tera");
         template!(tera, "zod/events.ts.tera", "templates/events.ts.tera");
         template!(tera, "zod/index.ts.tera", "templates/index.ts.tera");
+        template!(tera, "zod/constants.ts.tera", "templates/constants.ts.tera");
 
         // Partial templates
         template!(
@@ -108,7 +109,7 @@ mod tests {
             let tera = ZodTemplate::create_tera().unwrap();
             let count = tera.get_template_names().count();
             // Should have 11 templates (4 main + 6 partials + 1 common)
-            assert!(count == 11);
+            assert!(count == 12);
         }
 
         #[test]

@@ -66,7 +66,7 @@ impl SerdeParser {
 }
 
 /// Parse a string value from a meta item like `name = "value"`
-fn parse_string_value(meta: &syn::meta::ParseNestedMeta) -> syn::Result<Option<String>> {
+fn parse_string_value(meta: &syn::meta::ParseNestedMeta<'_>) -> syn::Result<Option<String>> {
     let expr: Expr = meta.value()?.parse()?;
     if let Expr::Lit(ExprLit {
         lit: Lit::Str(lit_str),

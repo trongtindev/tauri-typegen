@@ -30,7 +30,7 @@ fn test_backward_compatibility_default_camel_case() {
         .unwrap();
 
     let output_dir = TempDir::new().unwrap();
-    let mut generator = create_generator(Some("none".to_string()));
+    let mut generator = create_generator(Some("none".to_string())).unwrap();
     generator
         .generate_models(
             &commands,

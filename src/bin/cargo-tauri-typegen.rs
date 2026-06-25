@@ -216,6 +216,7 @@ fn run_generate(
     // Check cache to see if regeneration is needed (unless force is set)
     let discovered_structs = analyzer.get_discovered_structs();
     let discovered_events = analyzer.get_discovered_events();
+    let discovered_constants = analyzer.get_discovered_constants();
     let needs_regeneration = if config.should_force() {
         if config.is_verbose() {
             println!("🔄 Force flag set, regenerating bindings");
@@ -227,6 +228,7 @@ fn run_generate(
             &commands,
             discovered_structs,
             discovered_events,
+            discovered_constants,
             &config,
         )
         .unwrap_or(true) // On error, assume regeneration is needed
@@ -251,7 +253,7 @@ fn run_generate(
         _ => return Err("Invalid validation library. Use 'zod' or 'none'".into()),
     };
 
-    let mut generator = create_generator(validation);
+    let mut generator = create_generator(validation)?;
     let generated_files = generator.generate_models(
         &commands,
         discovered_structs,
@@ -275,7 +277,13 @@ fn run_generate(
     }
 
     // Save cache after successful generation
-    let cache = GenerationCache::new(&commands, discovered_structs, discovered_events, &config)?;
+    let cache = GenerationCache::new(
+        &commands,
+        discovered_structs,
+        discovered_events,
+        discovered_constants,
+        &config,
+    )?;
     if let Err(e) = cache.save(&config.output_path) {
         eprintln!("Warning: Failed to save generation cache: {}", e);
     }
@@ -386,7 +394,7 @@ fn run_init(
     run_generate(
         Some(project_path),
         Some(generated_path),
-        Some(config.validation_library.clone()),
+        Some(config.validation_library),
         verbose,
         visualize_deps,
         None,  // No config file since we just created one

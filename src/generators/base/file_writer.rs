@@ -53,6 +53,14 @@ impl FileWriter {
         self.write_typescript_file("events.ts", content)
     }
 
+    /// Write the constants.ts file
+    pub fn write_constants_file(
+        &mut self,
+        content: &str,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        self.write_typescript_file("constants.ts", content)
+    }
+
     /// Get the list of generated files
     pub fn get_generated_files(&self) -> &[String] {
         &self.generated_files

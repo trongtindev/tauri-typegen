@@ -1,5 +1,5 @@
 use crate::interface::config::GenerateConfig;
-use crate::models::{CommandInfo, EventInfo, StructInfo};
+use crate::models::{CommandInfo, EventInfo, StructInfo, WellKnownConstant};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
@@ -30,6 +30,8 @@ pub struct GenerationCache {
     structs_hash: String,
     /// Hash of all discovered events
     events_hash: String,
+    /// Hash of all discovered well-known constants
+    constants_hash: String,
     /// Hash of configuration settings that affect output
     config_hash: String,
     /// Combined hash for quick comparison
@@ -37,27 +39,35 @@ pub struct GenerationCache {
 }
 
 impl GenerationCache {
-    const CURRENT_VERSION: u32 = 2;
+    const CURRENT_VERSION: u32 = 3;
 
     /// Create a new cache from current generation state
     pub fn new(
         commands: &[CommandInfo],
         structs: &HashMap<String, StructInfo>,
         events: &[EventInfo],
+        discovered_constants: &[WellKnownConstant],
         config: &GenerateConfig,
     ) -> Result<Self, CacheError> {
         let commands_hash = Self::hash_commands(commands)?;
         let structs_hash = Self::hash_structs(structs)?;
         let events_hash = Self::hash_events(events)?;
+        let constants_hash = Self::hash_constants(discovered_constants)?;
         let config_hash = Self::hash_config(config)?;
-        let combined_hash =
-            Self::combine_hashes(&commands_hash, &structs_hash, &events_hash, &config_hash)?;
+        let combined_hash = Self::combine_hashes(
+            &commands_hash,
+            &structs_hash,
+            &events_hash,
+            &constants_hash,
+            &config_hash,
+        )?;
 
         Ok(Self {
             version: Self::CURRENT_VERSION,
             commands_hash,
             structs_hash,
             events_hash,
+            constants_hash,
             config_hash,
             combined_hash,
         })
@@ -91,6 +101,7 @@ impl GenerationCache {
         commands: &[CommandInfo],
         structs: &HashMap<String, StructInfo>,
         events: &[EventInfo],
+        discovered_constants: &[WellKnownConstant],
         config: &GenerateConfig,
     ) -> Result<bool, CacheError> {
         // Try to load previous cache
@@ -108,7 +119,7 @@ impl GenerationCache {
         }
 
         // Generate current cache
-        let current_cache = Self::new(commands, structs, events, config)?;
+        let current_cache = Self::new(commands, structs, events, discovered_constants, config)?;
 
         // Compare combined hashes
         Ok(previous_cache.combined_hash != current_cache.combined_hash)
@@ -286,6 +297,31 @@ impl GenerationCache {
         Ok(Self::compute_hash(&json))
     }
 
+    /// Generate a deterministic hash of well-known constants
+    fn hash_constants(constants: &[WellKnownConstant]) -> Result<String, CacheError> {
+        #[derive(Serialize)]
+        struct ConstantHashData<'a> {
+            module_name: &'a str,
+            const_name: &'a str,
+            value: &'a str,
+        }
+
+        let mut serialized: Vec<String> = constants
+            .iter()
+            .map(|c| {
+                serde_json::to_string(&ConstantHashData {
+                    module_name: &c.module_name,
+                    const_name: &c.const_name,
+                    value: &c.value,
+                })
+            })
+            .collect::<Result<_, _>>()?;
+        serialized.sort_unstable();
+
+        let json = serde_json::to_string(&serialized)?;
+        Ok(Self::compute_hash(&json))
+    }
+
     /// Generate a hash of configuration settings that affect output
     fn hash_config(config: &GenerateConfig) -> Result<String, CacheError> {
         #[derive(Serialize)]
@@ -323,9 +359,10 @@ impl GenerationCache {
         commands: &str,
         structs: &str,
         events: &str,
+        constants: &str,
         config: &str,
     ) -> Result<String, CacheError> {
-        let combined = format!("{}{}{}{}", commands, structs, events, config);
+        let combined = format!("{}{}{}{}{}", commands, structs, events, constants, config);
         Ok(Self::compute_hash(&combined))
     }
 
@@ -388,7 +425,7 @@ mod tests {
         let structs = HashMap::new();
         let config = create_test_config();
 
-        let cache = GenerationCache::new(&commands, &structs, &[], &config).unwrap();
+        let cache = GenerationCache::new(&commands, &structs, &[], &[], &config).unwrap();
 
         assert_eq!(cache.version, GenerationCache::CURRENT_VERSION);
         assert!(!cache.commands_hash.is_empty());
@@ -404,7 +441,7 @@ mod tests {
         let structs = HashMap::new();
         let config = create_test_config();
 
-        let cache = GenerationCache::new(&commands, &structs, &[], &config).unwrap();
+        let cache = GenerationCache::new(&commands, &structs, &[], &[], &config).unwrap();
         cache.save(temp_dir.path()).unwrap();
 
         let loaded_cache = GenerationCache::load(temp_dir.path()).unwrap();
@@ -421,9 +458,15 @@ mod tests {
         let structs = HashMap::new();
         let config = create_test_config();
 
-        let needs_regen =
-            GenerationCache::needs_regeneration(temp_dir.path(), &commands, &structs, &[], &config)
-                .unwrap();
+        let needs_regen = GenerationCache::needs_regeneration(
+            temp_dir.path(),
+            &commands,
+            &structs,
+            &[],
+            &[],
+            &config,
+        )
+        .unwrap();
 
         assert!(needs_regen);
     }
@@ -436,13 +479,19 @@ mod tests {
         let config = create_test_config();
 
         // Save initial cache
-        let cache = GenerationCache::new(&commands, &structs, &[], &config).unwrap();
+        let cache = GenerationCache::new(&commands, &structs, &[], &[], &config).unwrap();
         cache.save(temp_dir.path()).unwrap();
 
         // Check if regeneration needed with same data
-        let needs_regen =
-            GenerationCache::needs_regeneration(temp_dir.path(), &commands, &structs, &[], &config)
-                .unwrap();
+        let needs_regen = GenerationCache::needs_regeneration(
+            temp_dir.path(),
+            &commands,
+            &structs,
+            &[],
+            &[],
+            &config,
+        )
+        .unwrap();
 
         assert!(!needs_regen);
     }
@@ -455,7 +504,7 @@ mod tests {
         let config = create_test_config();
 
         // Save initial cache
-        let cache = GenerationCache::new(&commands, &structs, &[], &config).unwrap();
+        let cache = GenerationCache::new(&commands, &structs, &[], &[], &config).unwrap();
         cache.save(temp_dir.path()).unwrap();
 
         // Change commands
@@ -465,6 +514,7 @@ mod tests {
             temp_dir.path(),
             &new_commands,
             &structs,
+            &[],
             &[],
             &config,
         )
@@ -481,7 +531,7 @@ mod tests {
         let config = create_test_config();
 
         // Save initial cache
-        let cache = GenerationCache::new(&commands, &structs, &[], &config).unwrap();
+        let cache = GenerationCache::new(&commands, &structs, &[], &[], &config).unwrap();
         cache.save(temp_dir.path()).unwrap();
 
         // Change config
@@ -492,6 +542,7 @@ mod tests {
             temp_dir.path(),
             &commands,
             &structs,
+            &[],
             &[],
             &new_config,
         )
@@ -506,8 +557,8 @@ mod tests {
         let structs = HashMap::new();
         let config = create_test_config();
 
-        let cache1 = GenerationCache::new(&commands, &structs, &[], &config).unwrap();
-        let cache2 = GenerationCache::new(&commands, &structs, &[], &config).unwrap();
+        let cache1 = GenerationCache::new(&commands, &structs, &[], &[], &config).unwrap();
+        let cache2 = GenerationCache::new(&commands, &structs, &[], &[], &config).unwrap();
 
         assert_eq!(cache1.combined_hash, cache2.combined_hash);
         assert_eq!(cache1.commands_hash, cache2.commands_hash);
@@ -534,9 +585,15 @@ mod tests {
         std::fs::write(&cache_path, old_cache_content).unwrap();
 
         // Should need regeneration due to version mismatch
-        let needs_regen =
-            GenerationCache::needs_regeneration(temp_dir.path(), &commands, &structs, &[], &config)
-                .unwrap();
+        let needs_regen = GenerationCache::needs_regeneration(
+            temp_dir.path(),
+            &commands,
+            &structs,
+            &[],
+            &[],
+            &config,
+        )
+        .unwrap();
 
         assert!(needs_regen);
     }
@@ -547,7 +604,7 @@ mod tests {
         let structs: HashMap<String, crate::models::StructInfo> = HashMap::new();
         let config = create_test_config();
 
-        let cache = GenerationCache::new(&commands, &structs, &[], &config).unwrap();
+        let cache = GenerationCache::new(&commands, &structs, &[], &[], &config).unwrap();
 
         // Should still create valid hashes even with empty data
         assert!(!cache.commands_hash.is_empty());
@@ -609,8 +666,8 @@ mod tests {
         structs2.insert("StructB".to_string(), struct_b);
         structs2.insert("StructA".to_string(), struct_a);
 
-        let cache1 = GenerationCache::new(&commands, &structs1, &[], &config).unwrap();
-        let cache2 = GenerationCache::new(&commands, &structs2, &[], &config).unwrap();
+        let cache1 = GenerationCache::new(&commands, &structs1, &[], &[], &config).unwrap();
+        let cache2 = GenerationCache::new(&commands, &structs2, &[], &[], &config).unwrap();
 
         // Hash should be the same regardless of insertion order
         assert_eq!(cache1.structs_hash, cache2.structs_hash);
@@ -631,8 +688,8 @@ mod tests {
             create_test_command("alpha_command"),
         ];
 
-        let cache1 = GenerationCache::new(&commands1, &structs, &[], &config).unwrap();
-        let cache2 = GenerationCache::new(&commands2, &structs, &[], &config).unwrap();
+        let cache1 = GenerationCache::new(&commands1, &structs, &[], &[], &config).unwrap();
+        let cache2 = GenerationCache::new(&commands2, &structs, &[], &[], &config).unwrap();
 
         assert_eq!(cache1.commands_hash, cache2.commands_hash);
         assert_eq!(cache1.combined_hash, cache2.combined_hash);
@@ -662,8 +719,8 @@ mod tests {
             vec![],
         );
 
-        let cache1 = GenerationCache::new(&[command1], &structs, &[], &config).unwrap();
-        let cache2 = GenerationCache::new(&[command2], &structs, &[], &config).unwrap();
+        let cache1 = GenerationCache::new(&[command1], &structs, &[], &[], &config).unwrap();
+        let cache2 = GenerationCache::new(&[command2], &structs, &[], &[], &config).unwrap();
 
         assert_eq!(cache1.commands_hash, cache2.commands_hash);
         assert_eq!(cache1.combined_hash, cache2.combined_hash);
@@ -690,8 +747,8 @@ mod tests {
             line_number: 200,
         };
 
-        let cache1 = GenerationCache::new(&commands, &structs, &[event1], &config).unwrap();
-        let cache2 = GenerationCache::new(&commands, &structs, &[event2], &config).unwrap();
+        let cache1 = GenerationCache::new(&commands, &structs, &[event1], &[], &config).unwrap();
+        let cache2 = GenerationCache::new(&commands, &structs, &[event2], &[], &config).unwrap();
 
         assert_eq!(cache1.events_hash, cache2.events_hash);
         assert_eq!(cache1.combined_hash, cache2.combined_hash);
@@ -730,8 +787,8 @@ mod tests {
         let mut structs2 = HashMap::new();
         structs2.insert("Payload".to_string(), struct2);
 
-        let cache1 = GenerationCache::new(&commands, &structs1, &[], &config).unwrap();
-        let cache2 = GenerationCache::new(&commands, &structs2, &[], &config).unwrap();
+        let cache1 = GenerationCache::new(&commands, &structs1, &[], &[], &config).unwrap();
+        let cache2 = GenerationCache::new(&commands, &structs2, &[], &[], &config).unwrap();
 
         assert_eq!(cache1.structs_hash, cache2.structs_hash);
         assert_eq!(cache1.combined_hash, cache2.combined_hash);
@@ -787,8 +844,8 @@ mod tests {
         command1.serde_rename_all = Some(RenameRule::SnakeCase);
         command2.channels[0].serde_rename = Some("progressUpdates".to_string());
 
-        let cache1 = GenerationCache::new(&[command1], &structs, &[], &config).unwrap();
-        let cache2 = GenerationCache::new(&[command2], &structs, &[], &config).unwrap();
+        let cache1 = GenerationCache::new(&[command1], &structs, &[], &[], &config).unwrap();
+        let cache2 = GenerationCache::new(&[command2], &structs, &[], &[], &config).unwrap();
 
         assert_ne!(cache1.commands_hash, cache2.commands_hash);
         assert_ne!(cache1.combined_hash, cache2.combined_hash);
@@ -846,8 +903,8 @@ mod tests {
         let mut structs2 = HashMap::new();
         structs2.insert("Payload".to_string(), struct2);
 
-        let cache1 = GenerationCache::new(&commands, &structs1, &[], &config).unwrap();
-        let cache2 = GenerationCache::new(&commands, &structs2, &[], &config).unwrap();
+        let cache1 = GenerationCache::new(&commands, &structs1, &[], &[], &config).unwrap();
+        let cache2 = GenerationCache::new(&commands, &structs2, &[], &[], &config).unwrap();
 
         assert_ne!(cache1.structs_hash, cache2.structs_hash);
         assert_ne!(cache1.combined_hash, cache2.combined_hash);
@@ -898,8 +955,8 @@ mod tests {
         let mut structs2 = HashMap::new();
         structs2.insert("StatusEvent".to_string(), enum2);
 
-        let cache1 = GenerationCache::new(&commands, &structs1, &[], &config).unwrap();
-        let cache2 = GenerationCache::new(&commands, &structs2, &[], &config).unwrap();
+        let cache1 = GenerationCache::new(&commands, &structs1, &[], &[], &config).unwrap();
+        let cache2 = GenerationCache::new(&commands, &structs2, &[], &[], &config).unwrap();
 
         assert_ne!(cache1.structs_hash, cache2.structs_hash);
         assert_ne!(cache1.combined_hash, cache2.combined_hash);
@@ -917,9 +974,15 @@ mod tests {
         std::fs::write(&cache_path, "not valid json").unwrap();
 
         // Should need regeneration because cache is unreadable
-        let needs_regen =
-            GenerationCache::needs_regeneration(temp_dir.path(), &commands, &structs, &[], &config)
-                .unwrap();
+        let needs_regen = GenerationCache::needs_regeneration(
+            temp_dir.path(),
+            &commands,
+            &structs,
+            &[],
+            &[],
+            &config,
+        )
+        .unwrap();
 
         assert!(needs_regen);
     }
@@ -936,8 +999,8 @@ mod tests {
 
         let config2 = create_test_config(); // No type mappings
 
-        let cache1 = GenerationCache::new(&commands, &structs, &[], &config1).unwrap();
-        let cache2 = GenerationCache::new(&commands, &structs, &[], &config2).unwrap();
+        let cache1 = GenerationCache::new(&commands, &structs, &[], &[], &config1).unwrap();
+        let cache2 = GenerationCache::new(&commands, &structs, &[], &[], &config2).unwrap();
 
         // Config hash should differ when type_mappings differ
         assert_ne!(cache1.config_hash, cache2.config_hash);
@@ -961,8 +1024,8 @@ mod tests {
         mappings2.insert("First".to_string(), "string".to_string());
         config2.type_mappings = Some(mappings2);
 
-        let cache1 = GenerationCache::new(&commands, &structs, &[], &config1).unwrap();
-        let cache2 = GenerationCache::new(&commands, &structs, &[], &config2).unwrap();
+        let cache1 = GenerationCache::new(&commands, &structs, &[], &[], &config1).unwrap();
+        let cache2 = GenerationCache::new(&commands, &structs, &[], &[], &config2).unwrap();
 
         assert_eq!(cache1.config_hash, cache2.config_hash);
         assert_eq!(cache1.combined_hash, cache2.combined_hash);
@@ -977,7 +1040,8 @@ mod tests {
         let initial_events = vec![create_test_event("alpha-ready")];
         let changed_events = vec![create_test_event("beta-ready")];
 
-        let cache = GenerationCache::new(&commands, &structs, &initial_events, &config).unwrap();
+        let cache =
+            GenerationCache::new(&commands, &structs, &initial_events, &[], &config).unwrap();
         cache.save(temp_dir.path()).unwrap();
 
         let needs_regen = GenerationCache::needs_regeneration(
@@ -985,6 +1049,7 @@ mod tests {
             &commands,
             &structs,
             &changed_events,
+            &[],
             &config,
         )
         .unwrap();
@@ -1013,9 +1078,10 @@ mod tests {
 
         let cmd_without_channel = create_test_command("test_command");
 
-        let cache_with = GenerationCache::new(&[cmd_with_channel], &structs, &[], &config).unwrap();
+        let cache_with =
+            GenerationCache::new(&[cmd_with_channel], &structs, &[], &[], &config).unwrap();
         let cache_without =
-            GenerationCache::new(&[cmd_without_channel], &structs, &[], &config).unwrap();
+            GenerationCache::new(&[cmd_without_channel], &structs, &[], &[], &config).unwrap();
 
         // Commands hash should differ when channels differ
         assert_ne!(cache_with.commands_hash, cache_without.commands_hash);
@@ -1030,7 +1096,7 @@ mod tests {
         let structs = HashMap::new();
         let config = create_test_config();
 
-        let cache = GenerationCache::new(&commands, &structs, &[], &config).unwrap();
+        let cache = GenerationCache::new(&commands, &structs, &[], &[], &config).unwrap();
 
         // Should create nested directories
         cache.save(&nested_output).unwrap();
@@ -1045,5 +1111,52 @@ mod tests {
         // Should return an error when cache doesn't exist
         let result = GenerationCache::load(temp_dir.path());
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_constants_change_triggers_regeneration() {
+        let temp_dir = TempDir::new().unwrap();
+        let commands = vec![create_test_command("test_command")];
+        let structs = HashMap::new();
+        let config = create_test_config();
+        let events: Vec<EventInfo> = vec![];
+
+        let initial_constants = vec![WellKnownConstant {
+            module_name: "wizard_step_id".to_string(),
+            const_name: "PRINTER_SELECTION".to_string(),
+            value: "printer-selection".to_string(),
+        }];
+
+        let cache = GenerationCache::new(&commands, &structs, &events, &initial_constants, &config)
+            .unwrap();
+        cache.save(temp_dir.path()).unwrap();
+
+        let needs_regen = GenerationCache::needs_regeneration(
+            temp_dir.path(),
+            &commands,
+            &structs,
+            &events,
+            &initial_constants,
+            &config,
+        )
+        .unwrap();
+        assert!(!needs_regen);
+
+        let changed_constants = vec![WellKnownConstant {
+            module_name: "wizard_step_id".to_string(),
+            const_name: "PRINTER_SELECTION".to_string(),
+            value: "printer-selection-v2".to_string(),
+        }];
+
+        let needs_regen = GenerationCache::needs_regeneration(
+            temp_dir.path(),
+            &commands,
+            &structs,
+            &events,
+            &changed_constants,
+            &config,
+        )
+        .unwrap();
+        assert!(needs_regen);
     }
 }
